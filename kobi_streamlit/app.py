@@ -94,7 +94,7 @@ def send_claude(text):
         return "❌ API key ayarlanmamış."
     client = anthropic.Anthropic(api_key=api_key)
     # Sadece user/assistant mesajlarını gönder
-    msgs = [m for m in st.session_state.chat_msgs if m["role"] in ("user","assistant") and m.get("content") != "__REPORT__"]
+    msgs = [{"role": m["role"], "content": m["content"]} for m in st.session_state.chat_msgs if m["role"] in ("user","assistant") and m.get("content") != "__REPORT__"]
     msgs.append({"role":"user","content":text})
     r = client.messages.create(model="claude-sonnet-4-5", max_tokens=800, system=build_prompt(), messages=msgs)
     return r.content[0].text
