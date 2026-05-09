@@ -1,7 +1,7 @@
 import streamlit as st
 import anthropic
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 import time as time_module
 
 st.set_page_config(page_title="KOBİ Asistan", page_icon="🌿", layout="wide")
@@ -21,7 +21,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ── VERİ ─────────────────────────────────────────────
 NAMES  = ["Ahmet Yılmaz","Fatma Kaya","Mehmet Demir","Ayşe Çelik","Can Arslan","Zeynep Kurt","Ali Şahin","Elif Aydın","Murat Öztürk","Selin Çetin","Hasan Kılıç","Merve Doğan","Emre Yıldız","Büşra Aksoy","Tolga Güneş","Hatice Eren","Serkan Polat","Neslihan Koç","Burak Acar","Gizem Şen"]
 PRODS  = ["Organik Domates 5kg","Zeytinyağı 1L","Bal 500g","Peynir 1kg","Zeytin 500g","Ceviz 1kg","Nohut 2kg","Organik Yumurta 15li","Tarhana 500g","Kekik 100g"]
 SEHIR  = ["Ankara","İstanbul","İzmir","Bursa","Antalya","Konya","Adana","Gaziantep","Mersin","Trabzon"]
@@ -31,11 +30,13 @@ OTH_D  = ["Konya Selçuklu","İzmir Konak","Bursa Osmangazi","Adana Seyhan","Ant
 
 def pick(a): return a[int(random.random()*len(a))]
 
-# ── SESSION STATE ─────────────────────────────────────
+# SESSION STATE
 if "chat_msgs" not in st.session_state:
     st.session_state.chat_msgs = []
 if "report_sent" not in st.session_state:
     st.session_state.report_sent = False
+if "pending_msg" not in st.session_state:
+    st.session_state.pending_msg = None
 if "kargolar" not in st.session_state:
     kargolar = []
     for i in range(12):
@@ -59,7 +60,6 @@ if "orders" not in st.session_state:
         orders.append({"id":128+i,"musteri":NAMES[i%len(NAMES)],"urun":pick(PRODS),"status":s,"city":c})
     st.session_state.orders = orders
 
-# ── YARDIMCILAR ───────────────────────────────────────
 def stok_durum(q, t):
     if q <= t: return "Kritik 🔴"
     if q <= t*1.3: return "Düşük 🟡"
@@ -91,9 +91,11 @@ Kritik stok veya gecikme varsa sormadan uyar. Günlük rapor 21:00'de otomatik �
 def send_claude(text):
     api_key = st.secrets.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return "❌ API key ayarlanmamış. Streamlit Cloud → Settings → Secrets bölümüne ekleyin."
+        return "❌ API key ayarlanmamış."
     client = anthropic.Anthropic(api_key=api_key)
-    msgs = st.session_state.chat_msgs + [{"role":"user","content":text}]
+    # Sadece user/assistant mesajlarını gönder
+    msgs = [m for m in st.session_state.chat_msgs if m["role"] in ("user","assistant") and m.get("content") != "__REPORT__"]
+    msgs.append({"role":"user","content":text})
     r = client.messages.create(model="claude-sonnet-4-5", max_tokens=800, system=build_prompt(), messages=msgs)
     return r.content[0].text
 
@@ -116,8 +118,8 @@ def build_report():
     tarih   = datetime.now().strftime("%d.%m.%Y")
     stok_rows = "".join(f'<div class="rc-row"><span>{s["name"]}</span><span>{s["quantity"]} {s["unit"]} — {stok_durum(s["quantity"],s["threshold"])}</span></div>' for s in S)
     yolda_rows = "".join(f'<div class="rc-row"><span>{k["musteri"]}</span><span style="color:#888;font-size:12px;">{k["kod"]} · {k["sehir"]}</span></div>' for k in yolda[:6])
-    gec_rows   = "".join(f'<div class="rc-row"><span>{k["musteri"]}</span><span style="color:#A32D2D;">{k["sehir"]}</span></div>' for k in geciken)
-    kritik_w   = f'<div style="background:#fff0f0;border:1px solid #f0c0c0;border-radius:7px;padding:8px;color:#A32D2D;font-size:12px;margin-top:8px;">⚠️ Kritik stok: {", ".join(s["name"] for s in kritik)}</div>' if kritik else ""
+    gec_rows = "".join(f'<div class="rc-row"><span>{k["musteri"]}</span><span style="color:#A32D2D;">{k["sehir"]}</span></div>' for k in geciken)
+    kritik_w = f'<div style="background:#fff0f0;border:1px solid #f0c0c0;border-radius:7px;padding:8px;color:#A32D2D;font-size:12px;margin-top:8px;">⚠️ Kritik stok: {", ".join(s["name"] for s in kritik)}</div>' if kritik else ""
     return f"""
     <div class="report-card">
         <div style="font-weight:700;font-size:14px;margin-bottom:10px;">📈 Günlük rapor — {tarih} 21:00</div>
@@ -132,12 +134,11 @@ def build_report():
         {stok_rows}{kritik_w}
     </div>"""
 
-# ── SIDEBAR ───────────────────────────────────────────
+# SIDEBAR
 with st.sidebar:
     st.markdown("### 🌿 KOBİ Asistan")
     now = datetime.now()
     st.markdown(f"🕐 **{now.strftime('%H:%M')}**")
-    from datetime import timedelta
     target = now.replace(hour=21,minute=0,second=0,microsecond=0)
     if now >= target: target += timedelta(days=1)
     diff = int((target-now).total_seconds())
@@ -150,28 +151,33 @@ with st.sidebar:
     c2.metric("Yolda", sum(1 for k in K if k["durum"]=="yolda"))
     c1.metric("Geciken", sum(1 for k in K if k["durum"]=="gecikiyor"))
     c2.metric("Kritik Stok", sum(1 for s in st.session_state.stok if s["quantity"]<=s["threshold"]))
-
-    # Otomatik rapor
     if now.hour==21 and now.minute==0 and not st.session_state.report_sent:
         st.session_state.report_sent = True
         st.session_state.chat_msgs.append({"role":"assistant","content":"__REPORT__","report_html":build_report(),"tool":"📊 Günlük otomatik rapor"})
 
-# ── SEKMELER ─────────────────────────────────────────
+# SEKMELER
 tab1, tab2, tab3 = st.tabs(["💬 Asistan", "🚚 Kargo Yönetimi", "📦 Stok Yönetimi"])
 
-# CHAT
+# ── CHAT ─────────────────────────────────────────────
 with tab1:
     st.markdown("#### 💬 Müşteri Asistanı")
 
-    cols = st.columns(5)
+    # Hızlı sorular
     chips = ["Yoldaki kargolar?","Kritik stoklar?","Geciken var mı?","Günlük rapor","Ankara siparişleri?"]
+    cols = st.columns(len(chips))
     for i,q in enumerate(chips):
-        if cols[i].button(q, key=f"c{i}", use_container_width=True):
-            st.session_state._qmsg = q
+        if cols[i].button(q, key=f"chip_{i}", use_container_width=True):
+            st.session_state.pending_msg = q
+
+    col_r = st.columns([5,1])
+    with col_r[1]:
+        if st.button("📊 Rapor test", use_container_width=True):
+            st.session_state.chat_msgs.append({"role":"assistant","content":"__REPORT__","report_html":build_report(),"tool":"📊 Günlük otomatik rapor"})
 
     st.divider()
 
-    chat_area = st.container(height=420)
+    # Mesaj göster
+    chat_area = st.container(height=400)
     with chat_area:
         if not st.session_state.chat_msgs:
             st.markdown('<div class="row-bot"><div class="chat-bot">Merhaba! Sipariş, stok ve kargo konularında yardımcı olabilirim.<br>Her akşam <strong>21:00</strong>\'de günlük rapor otomatik olarak burada görünecek.</div></div>', unsafe_allow_html=True)
@@ -187,18 +193,13 @@ with tab1:
                     c = msg["content"].replace("\n","<br>")
                     st.markdown(f'<div class="row-bot"><div class="chat-bot">{tp}{c}</div></div>', unsafe_allow_html=True)
 
-    col_i, col_r = st.columns([5,1])
-    with col_r:
-        if st.button("📊 Rapor test", use_container_width=True):
-            st.session_state.chat_msgs.append({"role":"assistant","content":"__REPORT__","report_html":build_report(),"tool":"📊 Günlük otomatik rapor"})
-            st.rerun()
+    # Chat input
+    user_input = st.chat_input("Mesaj yazın...")
 
-    with col_i:
-        user_input = st.chat_input("Mesaj yazın...")
-
-    if hasattr(st.session_state,"_qmsg") and st.session_state._qmsg:
-        user_input = st.session_state._qmsg
-        st.session_state._qmsg = None
+    # pending_msg varsa onu kullan
+    if st.session_state.pending_msg:
+        user_input = st.session_state.pending_msg
+        st.session_state.pending_msg = None
 
     if user_input:
         st.session_state.chat_msgs.append({"role":"user","content":user_input})
@@ -208,17 +209,17 @@ with tab1:
                 tl = tool_label(user_input)
                 st.session_state.chat_msgs.append({"role":"assistant","content":reply,"tool":tl})
             except Exception as e:
-                st.error(f"Hata: {e}")
+                st.session_state.chat_msgs.append({"role":"assistant","content":f"❌ Hata: {e}"})
         st.rerun()
 
-# KARGO
+# ── KARGO ─────────────────────────────────────────────
 with tab2:
     st.markdown("#### 🚚 Kargo Yönetimi")
     with st.expander("➕ Yeni kargo girişi", expanded=True):
         c1,c2,c3 = st.columns(3)
-        k_kod  = c1.text_input("Takip kodu", placeholder="TRK123456")
-        k_mus  = c2.text_input("Müşteri adı", placeholder="Ad Soyad")
-        k_sip  = c3.number_input("Sipariş no", min_value=1, value=200, step=1)
+        k_kod = c1.text_input("Takip kodu", placeholder="TRK123456")
+        k_mus = c2.text_input("Müşteri adı", placeholder="Ad Soyad")
+        k_sip = c3.number_input("Sipariş no", min_value=1, value=200, step=1)
         c4,c5,c6 = st.columns(3)
         k_urun = c4.text_input("Ürün", placeholder="Organik Domates 5kg")
         k_seh  = c5.text_input("Şehir", placeholder="Ankara")
@@ -242,50 +243,52 @@ with tab2:
         cols[1].markdown(f"#{k['sipNo']}")
         cols[2].markdown(k["musteri"])
         cols[3].markdown(k["sehir"])
-        nd = cols[4].selectbox("",DUR_OPT,index=DUR_OPT.index(k["durum"]),format_func=lambda x:DUR_EMO[x],key=f"kd{k['id']}",label_visibility="collapsed")
+        nd = cols[4].selectbox("",DUR_OPT,index=DUR_OPT.index(k["durum"]),format_func=lambda x:DUR_EMO[x],key=f"kd_{k['id']}",label_visibility="collapsed")
         if nd != k["durum"]:
             st.session_state.kargolar[idx]["durum"] = nd
             st.rerun()
-        if cols[5].button("✕",key=f"kdel{k['id']}"):
+        if cols[5].button("✕",key=f"kdel_{k['id']}"):
             to_del.append(k["id"])
     if to_del:
         st.session_state.kargolar = [k for k in st.session_state.kargolar if k["id"] not in to_del]
         st.rerun()
 
-# STOK
+# ── STOK ──────────────────────────────────────────────
 with tab3:
     st.markdown("#### 📦 Stok Yönetimi")
     st.markdown("**Mevcut stoklar**")
     sdel = []
+    changed = False
     for idx,s in enumerate(st.session_state.stok):
         d = stok_durum(s["quantity"],s["threshold"])
         cols = st.columns([2.5,1.5,1,1,1.5,0.5])
         cols[0].markdown(f"**{s['name']}**")
-        nq = cols[1].number_input("",min_value=0,value=s["quantity"],key=f"sq{idx}",label_visibility="collapsed")
+        nq = cols[1].number_input("",min_value=0,value=s["quantity"],key=f"sq_{idx}",label_visibility="collapsed")
         cols[2].markdown(f"<span style='color:#888;font-size:13px;'>{s['unit']}</span>",unsafe_allow_html=True)
         cols[3].markdown(f"<span style='color:#888;font-size:13px;'>eşik:{s['threshold']}</span>",unsafe_allow_html=True)
         cols[4].markdown(d)
-        if cols[5].button("✕",key=f"sdel{idx}"): sdel.append(idx)
-        if nq != s["quantity"]: st.session_state.stok[idx]["quantity"] = nq
+        if cols[5].button("✕",key=f"sdel_{idx}"): sdel.append(idx)
+        if nq != s["quantity"]:
+            st.session_state.stok[idx]["quantity"] = nq
+            changed = True
     if sdel:
         st.session_state.stok = [s for i,s in enumerate(st.session_state.stok) if i not in sdel]
         st.rerun()
-
     if st.button("💾 Değişiklikleri kaydet", type="primary"):
         kritikler = [s["name"] for s in st.session_state.stok if s["quantity"]<=s["threshold"]]
         if kritikler: st.warning(f"⚠️ Kritik: {', '.join(kritikler)}")
         else: st.success("✓ Stok güncellendi")
-
     st.divider()
     with st.expander("➕ Yeni ürün ekle"):
         c1,c2,c3,c4 = st.columns(4)
-        sn = c1.text_input("Ürün adı",placeholder="Organik Elma")
-        su = c2.text_input("Birim",placeholder="kg")
-        sq = c3.number_input("Miktar",min_value=0,value=0)
-        st_ = c4.number_input("Eşik",min_value=0,value=0)
-        if st.button("+ Ekle",type="primary"):
+        sn = c1.text_input("Ürün adı", placeholder="Organik Elma")
+        su = c2.text_input("Birim", placeholder="kg")
+        sq = c3.number_input("Miktar", min_value=0, value=0)
+        st_ = c4.number_input("Eşik", min_value=0, value=0)
+        if st.button("+ Ekle", type="primary"):
             if sn and su:
                 st.session_state.stok.append({"name":sn,"unit":su,"quantity":int(sq),"threshold":int(st_)})
                 st.success(f"✓ '{sn}' eklendi")
                 st.rerun()
-            else: st.warning("Ad ve birim zorunlu")
+            else:
+                st.warning("Ad ve birim zorunlu")
